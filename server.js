@@ -81,6 +81,16 @@ function getDB() {
                 avatar: 'B',
                 password: hashPass('12345'),
             },
+            {
+            id: 'guru_1',
+            nis: 'guru1',
+            name: 'Guru Contoh',
+            kelas: '-',
+            kelasAjar: [], // diisi admin nanti
+            role: 'guru',
+            avatar: 'G',
+            password: hashPass('12345'),
+        },
         ],
         tokens: {},          // token -> userId
         face_descriptors: {},
@@ -105,6 +115,12 @@ function authMiddleware(req, res, next) {
 
 function adminOnly(req, res, next) {
     if (req.user.role !== 'admin' && req.user.role !== 'sekretaris')
+        return res.status(403).json({ success: false, message: 'Akses ditolak' });
+    next();
+}
+
+function guruOrAdmin(req, res, next) {
+    if (!['admin', 'sekretaris', 'guru'].includes(req.user.role))
         return res.status(403).json({ success: false, message: 'Akses ditolak' });
     next();
 }
@@ -150,14 +166,14 @@ app.get('/api/auth/me', authMiddleware, (req, res) => {
 // ═══════════════════ USER ROUTES ═════════════════════════════════════════════
 
 // GET /api/users
-app.get('/api/users', authMiddleware, adminOnly, (req, res) => {
+app.get('/api/users', authMiddleware, guruOrAdmin, (req, res) => {
     const db = getDB();
     res.json({ success: true, data: db.users.map(safeUser) });
 });
 
 // POST /api/users
 app.post('/api/users', authMiddleware, adminOnly, (req, res) => {
-    const { nis, name, kelas, role, password } = req.body;
+    const { nis, name, kelas, role, password, kelasAjar } = req.body;
     if (!name) return res.status(400).json({ success: false, message: 'Nama wajib diisi' });
     const db = getDB();
     if (nis && db.users.find(u => u.nis === nis))
@@ -168,6 +184,7 @@ app.post('/api/users', authMiddleware, adminOnly, (req, res) => {
         nis: nis || id,
         name,
         kelas: kelas || '-',
+        kelasAjar: kelasAjar || [],
         role: role || 'siswa',
         avatar: name[0].toUpperCase(),
         password: hashPass(password || '12345'),
@@ -232,7 +249,7 @@ app.post('/api/descriptors/:userId', authMiddleware, (req, res) => {
 // ═══════════════════ ATTENDANCE ══════════════════════════════════════════════
 
 // GET /api/attendance/today
-app.get('/api/attendance/today', authMiddleware, adminOnly, (req, res) => {
+app.get('/api/attendance/today', authMiddleware, guruOrAdmin, (req, res) => {
     const db = getDB();
     const today = new Date().toLocaleDateString('id-ID');
     const data = db.attendance
@@ -249,6 +266,14 @@ app.get('/api/attendance', authMiddleware, (req, res) => {
     // Siswa hanya lihat milik sendiri
     if (req.user.role === 'siswa') {
         data = data.filter(r => r.studentId === req.user.id);
+    } else if (req.user.role === 'guru') {
+        // Guru hanya lihat kelas yang dia ajar
+        if (req.user.kelasAjar?.length > 0) {
+            data = data.filter(r => req.user.kelasAjar.includes(r.kelas));
+        }
+        if (req.query.date) data = data.filter(r => r.date === req.query.date);
+        if (req.query.kelas) data = data.filter(r => r.kelas === req.query.kelas);
+        if (req.query.status) data = data.filter(r => r.status === req.query.status);
     } else {
         if (req.query.date) data = data.filter(r => r.date === req.query.date);
         if (req.query.kelas) data = data.filter(r => r.kelas === req.query.kelas);
@@ -295,7 +320,7 @@ app.post('/api/attendance', authMiddleware, async (req, res) => {
         if (sudahAbsen)
             return res.status(409).json({ success: false, message: 'Kamu sudah absen hari ini!' });
 
-        const { faceVerified, gpsVerified, distance, selfieBase64 } = req.body;
+        const { faceVerified, gpsVerified, distance, selfieBase64, lat, lng } = req.body;
 
 // Upload selfie ke Cloudinary
 let selfieUrl = null;
@@ -326,7 +351,9 @@ if (selfieBase64) {
             gpsVerified: !!gpsVerified,
             distance: distance || 0,
             status: (faceVerified && gpsVerified) ? 'hadir' : 'gagal',
-            selfieUrl: selfieUrl,
+selfieUrl: selfieUrl,
+lat: lat || null,
+lng: lng || null,
         };
         db.attendance.unshift(record);
         writeDB(db);
@@ -479,6 +506,12 @@ app.post('/api/auth/change-password', authMiddleware, (req, res) => {
         return res.status(400).json({ success: false, message: 'Password lama salah' });
     if (!newPassword || newPassword.length < 4)
         return res.status(400).json({ success: false, message: 'Password baru minimal 4 karakter' });
+    // Admin & sekretaris tidak kena limit
+if (req.user.role !== 'siswa') {
+    user.password = hashPass(newPassword);
+    writeDB(db);
+    return res.json({ success: true, message: 'Password berhasil diubah', remaining: 99 });
+}
     user.passChangeCount = (user.passChangeCount || 0) + 1;
     if (user.passChangeCount > 3)
         return res.status(403).json({ success: false, message: 'Batas ganti password (3x) tercapai. Hubungi admin untuk reset.', locked: true });
@@ -543,6 +576,134 @@ app.get('/api/health', (req, res) => {
         },
         uptime: process.uptime().toFixed(0) + 's',
     });
+});
+
+// ═══════════════════ IZIN/SAKIT ══════════════════════════════════════════════
+
+// GET /api/izin — admin: semua, siswa: milik sendiri
+app.get('/api/izin', authMiddleware, (req, res) => {
+    const db = getDB();
+    if (!db.izin) db.izin = [];
+    let data = [...db.izin].sort((a, b) => b.id - a.id);
+    if (req.user.role === 'siswa') {
+        data = data.filter(r => r.studentId === req.user.id);
+    } else if (req.user.role === 'guru') {
+        if (req.user.kelasAjar?.length > 0) {
+            data = data.filter(r => req.user.kelasAjar.includes(r.kelas));
+        }
+    }
+    res.json({ success: true, data, total: data.length });
+});
+
+// POST /api/izin — siswa submit izin
+app.post('/api/izin', authMiddleware, (req, res) => {
+    if (req.user.role !== 'siswa')
+        return res.status(403).json({ success: false, message: 'Hanya siswa yang bisa submit izin' });
+    const { jenis, keterangan, tanggal, fotoUrl } = req.body;
+    if (!jenis || !keterangan || !tanggal)
+        return res.status(400).json({ success: false, message: 'Jenis, keterangan, dan tanggal wajib diisi' });
+    const db = getDB();
+    if (!db.izin) db.izin = [];
+    // Cek duplikat
+    const existing = db.izin.find(r => r.studentId === req.user.id && r.tanggal === tanggal);
+    if (existing)
+        return res.status(409).json({ success: false, message: 'Kamu sudah submit izin untuk tanggal ini' });
+    const record = {
+        id: Date.now(),
+        studentId: req.user.id,
+        nis: req.user.nis,
+        studentName: req.user.name,
+        kelas: req.user.kelas,
+        avatar: req.user.avatar,
+        jenis, // 'izin' atau 'sakit'
+        keterangan,
+        tanggal,
+        fotoUrl: fotoUrl || null,
+        status: 'pending', // pending, approved, rejected
+        createdAt: new Date().toISOString(),
+        processedBy: null,
+        processedAt: null,
+    };
+    db.izin.unshift(record);
+    writeDB(db);
+    res.json({ success: true, data: record });
+});
+
+// PATCH /api/izin/:id — admin approve/reject
+app.patch('/api/izin/:id', authMiddleware, adminOnly, (req, res) => {
+    const { status } = req.body; // 'approved' atau 'rejected'
+    if (!['approved', 'rejected'].includes(status))
+        return res.status(400).json({ success: false, message: 'Status tidak valid' });
+    const db = getDB();
+    if (!db.izin) db.izin = [];
+    const izin = db.izin.find(r => r.id === parseInt(req.params.id));
+    if (!izin) return res.status(404).json({ success: false, message: 'Data izin tidak ditemukan' });
+    izin.status = status;
+    izin.processedBy = req.user.name;
+    izin.processedAt = new Date().toISOString();
+    // Kalau approved, tambahkan ke attendance
+    if (status === 'approved') {
+        if (!db.attendance) db.attendance = [];
+        const existing = db.attendance.find(r => r.studentId === izin.studentId && r.date === izin.tanggal);
+        if (!existing) {
+            db.attendance.unshift({
+                id: Date.now(),
+                timestamp: new Date().toISOString(),
+                studentId: izin.studentId,
+                nis: izin.nis,
+                studentName: izin.studentName,
+                kelas: izin.kelas,
+                avatar: izin.avatar,
+                time: '-',
+                date: izin.tanggal,
+                faceVerified: false,
+                gpsVerified: false,
+                distance: 0,
+                status: izin.jenis, // 'izin' atau 'sakit'
+                izinId: izin.id,
+            });
+        }
+    }
+    // Kalau rejected, tambahkan ke attendance sebagai alpha
+    if (status === 'rejected') {
+        if (!db.attendance) db.attendance = [];
+        const existing = db.attendance.find(r => r.studentId === izin.studentId && r.date === izin.tanggal);
+        if (!existing) {
+            db.attendance.unshift({
+                id: Date.now(),
+                timestamp: new Date().toISOString(),
+                studentId: izin.studentId,
+                nis: izin.nis,
+                studentName: izin.studentName,
+                kelas: izin.kelas,
+                avatar: izin.avatar,
+                time: '-',
+                date: izin.tanggal,
+                faceVerified: false,
+                gpsVerified: false,
+                distance: 0,
+                status: 'alpha',
+                izinId: izin.id,
+            });
+        }
+    }
+    writeDB(db);
+    res.json({ success: true, data: izin });
+});
+
+// DELETE /api/izin/:id — siswa batal izin (hanya kalau masih pending)
+app.delete('/api/izin/:id', authMiddleware, (req, res) => {
+    const db = getDB();
+    if (!db.izin) db.izin = [];
+    const izin = db.izin.find(r => r.id === parseInt(req.params.id));
+    if (!izin) return res.status(404).json({ success: false, message: 'Data tidak ditemukan' });
+    if (req.user.role === 'siswa' && izin.studentId !== req.user.id)
+        return res.status(403).json({ success: false, message: 'Akses ditolak' });
+    if (izin.status !== 'pending')
+        return res.status(400).json({ success: false, message: 'Izin yang sudah diproses tidak bisa dibatalkan' });
+    db.izin = db.izin.filter(r => r.id !== parseInt(req.params.id));
+    writeDB(db);
+    res.json({ success: true });
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
