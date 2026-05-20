@@ -2804,6 +2804,7 @@
                       <th>Wajah</th>
                       <th>GPS</th>
                       <th>Jarak</th>
+                      <th>Selfie</th>
                       <th>Status</th>
                     </tr>
                   </thead>
@@ -2940,6 +2941,7 @@
     let userLat = null, userLng = null, gpsWatcher = null;
     let editingUserId = null, editingAnnId = null, rekapData = [];
     let annImageBase64 = null;
+    let selfieBase64 = null;
 
     // ═══════════════════ INIT ═══════════════════
     window.addEventListener('load', async () => {
@@ -3152,10 +3154,18 @@
           setCamBadge('scanning', `Mencocokkan... (${matchCount}/3)`);
           if (matchCount >= 3) {
             verifiedFace = true;
-            setCamBadge('success', '✓ Wajah cocok! (' + distance.toFixed(2) + ')');
-            document.getElementById('cam-wrap').className = 'camera-wrap success';
-            clearInterval(detectInterval); detectInterval = null;
-            setTimeout(() => { stopCamera(); goToStep(2); }, 800);
+// Capture selfie sebelum kamera dimatikan
+try {
+    const snapCanvas = document.createElement('canvas');
+    snapCanvas.width = video.videoWidth || 320;
+    snapCanvas.height = video.videoHeight || 240;
+    snapCanvas.getContext('2d').drawImage(video, 0, 0);
+    selfieBase64 = snapCanvas.toDataURL('image/jpeg', 0.7);
+} catch(e) { selfieBase64 = null; }
+setCamBadge('success', '✓ Wajah cocok! (' + distance.toFixed(2) + ')');
+document.getElementById('cam-wrap').className = 'camera-wrap success';
+clearInterval(detectInterval); detectInterval = null;
+setTimeout(() => { stopCamera(); goToStep(2); }, 800);
           }
         } else {
           matchCount = 0;
@@ -3229,7 +3239,7 @@
     }
 
     async function submitAttendance(inZone, dist) {
-      const res = await api('/attendance', { method: 'POST', body: JSON.stringify({ faceVerified: verifiedFace, gpsVerified: inZone, distance: dist ? parseFloat(dist.toFixed(0)) : 0 }) });
+      const res = await api('/attendance', { method: 'POST', body: JSON.stringify({ faceVerified: verifiedFace, gpsVerified: inZone, distance: dist ? parseFloat(dist.toFixed(0)) : 0, selfieBase64 }) });
       let record;
       if (res.success) { record = res.data; }
       else {
@@ -3238,7 +3248,7 @@
       }
       goToStep(3);
       const success = record.status === 'hadir';
-      document.getElementById('result-container').innerHTML = `
+document.getElementById('result-container').innerHTML = `
 <div class="result-card ${success ? 'success' : 'error'}">
   <span class="result-icon"><i class="ti ti-${success ? 'circle-check' : 'circle-x'}"></i></span>
   <div class="result-title">${success ? 'Absensi Berhasil!' : 'Absensi Gagal'}</div>
@@ -3252,6 +3262,11 @@
       <i class="ti ti-map-pin"></i> GPS: ${record.gpsVerified ? '<span style="color:var(--green)">✓ Dalam zona</span>' : '<span style="color:var(--red)">✗ Luar zona (' + record.distance + 'm)</span>'}
     </div>
   </div>
+  ${record.selfieUrl ? `
+  <div style="margin-top:14px">
+    <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px">📷 Foto Selfie</div>
+    <img src="${record.selfieUrl}" alt="Selfie" style="width:100%;max-width:180px;border-radius:12px;border:3px solid ${success ? 'var(--green)' : 'var(--red)'};display:block;margin:0 auto">
+  </div>` : ''}
 </div>`;
       showToast(success ? 'Absensi tercatat!' : 'Absensi gagal', success ? 'success' : 'danger', success ? 'ti-check' : 'ti-x');
     }
@@ -3524,6 +3539,7 @@
   <td>${r.faceVerified ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--red)">✗</span>'}</td>
   <td>${r.gpsVerified ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--red)">✗</span>'}</td>
   <td>${r.distance}m</td>
+  <td>${r.selfieUrl ? `<img src="${r.selfieUrl}" style="width:40px;height:40px;border-radius:8px;object-fit:cover;cursor:pointer" onclick="window.open('${r.selfieUrl}','_blank')">` : '-'}</td>
   <td><span class="badge ${r.status}">${r.status === 'hadir' ? 'Hadir' : 'Gagal'}</span></td>
 </tr>`).join('');
     }

@@ -10,6 +10,13 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const cloudinary = require('cloudinary').v2;
+
+cloudinary.config({
+    cloud_name: 'dqmgg8wlc',
+    api_key: '437194589517298',
+    api_secret: '_XFvqZk2hmYPBM67lfkdxAyyPtI'
+});
 
 // ─── Simple JSON Database ─────────────────────────────────────────────────────
 const DB_FILE = path.join(__dirname, 'db.json');
@@ -252,7 +259,7 @@ app.get('/api/attendance', authMiddleware, (req, res) => {
 });
 
 // POST /api/attendance — ganti dengan ini
-app.post('/api/attendance', authMiddleware, (req, res) => {
+app.post('/api/attendance', authMiddleware, async (req, res) => {
     try {
         if (req.user.role !== 'siswa')
             return res.status(403).json({ success: false, message: 'Hanya siswa yang bisa absen' });
@@ -288,7 +295,22 @@ app.post('/api/attendance', authMiddleware, (req, res) => {
         if (sudahAbsen)
             return res.status(409).json({ success: false, message: 'Kamu sudah absen hari ini!' });
 
-        const { faceVerified, gpsVerified, distance } = req.body;
+        const { faceVerified, gpsVerified, distance, selfieBase64 } = req.body;
+
+// Upload selfie ke Cloudinary
+let selfieUrl = null;
+if (selfieBase64) {
+    try {
+        const uploadResult = await cloudinary.uploader.upload(selfieBase64, {
+            folder: 'spensacode/selfies',
+            public_id: `${req.user.id}_${Date.now()}`,
+            resource_type: 'image'
+        });
+        selfieUrl = uploadResult.secure_url;
+    } catch (e) {
+        console.error('Cloudinary upload error:', e);
+    }
+}
         const record = {
             id: Date.now(),
             timestamp: new Date().toISOString(),
@@ -304,6 +326,7 @@ app.post('/api/attendance', authMiddleware, (req, res) => {
             gpsVerified: !!gpsVerified,
             distance: distance || 0,
             status: (faceVerified && gpsVerified) ? 'hadir' : 'gagal',
+            selfieUrl: selfieUrl,
         };
         db.attendance.unshift(record);
         writeDB(db);
